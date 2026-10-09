@@ -1,0 +1,304 @@
+diff -ru ptLive.orig/include/MainWindow.h ptLive/include/MainWindow.h
+--- ptLive.orig/include/MainWindow.h	2026-10-08 11:03:12.373028407 +0000
++++ ptLive/include/MainWindow.h	2026-10-08 11:03:36.095886917 +0000
+@@ -37,7 +37,9 @@
+ {
+ public:
+     // fileToOpen: a .pt session (double-clicked in Explorer / command line). Empty = default session.
+-    explicit MainWindow(juce::String name, const juce::File& fileToOpen = {});
++    // tokenProvider: where the VPS client gets the license token (X-License-Token). Empty = key-only mode.
++    explicit MainWindow(juce::String name, const juce::File& fileToOpen = {},
++                        std::function<juce::String()> tokenProvider = {});
+     ~MainWindow() override;
+ 
+     void paint(juce::Graphics& g) override;
+@@ -151,6 +153,7 @@
+     // Declared AFTER the track manager (they use it) so they are destroyed BEFORE it.
+     std::unique_ptr<LiveController> liveController;
+     std::unique_ptr<ControlBar> controlBar;
++    std::function<juce::String()> licenseTokenProvider;   // handed to keyFetcher in setupLive()
+     std::unique_ptr<KeyFetcher> keyFetcher;
+     std::unique_ptr<SongDetector> songDetector;
+     std::unique_ptr<ptl::SongHistory> songHistory;       // persistent history of opened songs
+diff -ru ptLive.orig/include/Net/KeyFetcher.h ptLive/include/Net/KeyFetcher.h
+--- ptLive.orig/include/Net/KeyFetcher.h	2026-10-08 11:03:12.373055510 +0000
++++ ptLive/include/Net/KeyFetcher.h	2026-10-08 11:03:36.095154309 +0000
+@@ -20,10 +20,12 @@
+ class KeyFetcher : private juce::Thread
+ {
+ public:
+-    KeyFetcher();
++    // tokenProvider: returns the current license token ("" = none). Given to the VpsClient BEFORE the thread
++    // starts, so the very first request (warm-up) already carries it. Must be thread-safe (see LicenseClient::currentToken).
++    explicit KeyFetcher (std::function<juce::String()> tokenProvider = {});
+     ~KeyFetcher() override;
+ 
+-    bool isConfigured() const noexcept { return client.isConfigured(); }
++    bool isConfigured() const { return client.isConfigured(); }
+ 
+     // Start (or restart) the lookup for this song. Cancels the previous one.
+     void request (const juce::String& videoId, const juce::String& url, const juce::String& title);
+diff -ru ptLive.orig/include/Net/LicenseClient.h ptLive/include/Net/LicenseClient.h
+--- ptLive.orig/include/Net/LicenseClient.h	2026-10-08 11:03:12.373073890 +0000
++++ ptLive/include/Net/LicenseClient.h	2026-10-08 11:03:12.426751274 +0000
+@@ -107,6 +107,11 @@
+     Outcome refresh    (std::atomic<bool>& cancel);
+     Outcome deactivate (std::atomic<bool>& cancel);       // user removes THIS machine (uses one of the key's resets)
+ 
++    // The license token currently stored (the same one checkLocal() verifies), or "" when this machine is not
++    // activated. Thread-safe and cheap: kept in memory, refreshed by every save / clear of license.dat, so the
++    // network code can call it for every request without touching DPAPI. VpsClient sends it as X-License-Token.
++    juce::String currentToken();
++
+     //== Helpers ==============================================================
+     const juce::String& getHwid() const noexcept { return hwid; }
+     static juce::String toString (Gate g);
+@@ -136,7 +141,8 @@
+ 
+     VpsClient& vps;
+     juce::String hwid;
+-    juce::CriticalSection storeLock;                       // load-modify-save of license.dat
++    juce::CriticalSection storeLock;                       // load-modify-save of license.dat (also guards cachedToken)
++    juce::String cachedToken;                              // in-memory copy of the stored token, see currentToken()
+     juce::CriticalSection requestLock;                     // request log + last verdict
+     juce::String lastRefreshCode;
+     juce::int64 lastAttemptSec = 0;                        // last activation request attempt (success or not)
+diff -ru ptLive.orig/include/Net/VpsClient.h ptLive/include/Net/VpsClient.h
+--- ptLive.orig/include/Net/VpsClient.h	2026-10-08 11:03:12.373123258 +0000
++++ ptLive/include/Net/VpsClient.h	2026-10-08 11:03:36.094796992 +0000
+@@ -3,7 +3,7 @@
+     VpsClient - talks to the SAME VPS and the SAME API that the released ptStudio uses.
+     Nothing on the server changes, ptStudio keeps working as before.
+ 
+-    Endpoints used (all with header  X-API-Key):
++    Endpoints used (all with header  X-API-Key and/or X-License-Token):
+       GET  /api/tone-cache/check/{video_id}          -> {"found": true, "entry": {root, scale, viet, western, ...}}
+       POST /api/worker/job   {video_id,url,title,mode} -> {"job_id": "..."}
+       GET  /api/worker/result/{job_id}?timeout=N      -> {"status":"ok","result":{root,scale,viet,western}}
+@@ -11,7 +11,12 @@
+     NOT used on purpose: /api/tone-cache/sync (ptLive only reads, it never writes into the shared cache).
+ 
+     Config files (same format as ptStudio), looked up next to ptLive.exe, then in %APPDATA%/ptLive:
+-      vps_config.json   {"url": "https://host[:port]", "key": "..."}
++      vps_config.json   {"url": "https://host[:port]", "key": "..."}      ("key" is OPTIONAL, see token mode)
++
++    Token mode: when a token provider is set (setTokenProvider) every non-license request also carries
++      X-License-Token: <ed25519 license token>
++    so a release build can ship vps_config.json with only "url" - the license token is the credential.
++    If the config still has a "key", BOTH headers are sent (the server accepts either).
+       vps_cert.pem      pinned certificate / CA (same file ptStudio ships in _internal)
+ 
+     TLS: when vps_cert.pem exists the server certificate is accepted only if it IS one of the pinned
+@@ -45,7 +50,12 @@
+     // Opens the connection (DNS + TLS) in advance, so the first real song does not pay for it.
+     void warmUp();
+ 
+-    bool isConfigured() const noexcept { return host.isNotEmpty() && apiKey.isNotEmpty(); }
++    // Source of the license token (called on every request, from any thread: must be thread-safe and cheap).
++    // Returns "" when this machine has no license token. Set once, before the first request.
++    void setTokenProvider (std::function<juce::String()> provider);
++
++    // Ready to talk: url known AND (a "key" in vps_config.json OR the token provider returns a token).
++    bool isConfigured() const;
+ 
+     // Cache of results other users / earlier sessions already analysed.
+     std::optional<KeyResult> checkCache (const juce::String& videoId, std::atomic<bool>& cancel);
+@@ -69,6 +79,8 @@
+     Response request (const char* verb, const juce::String& path, const juce::String& jsonBody,
+                       int timeoutMs, std::atomic<bool>& cancel, bool retried = false, bool sendApiKey = true);
+ 
++    juce::String currentToken() const;       // "" = none / provider not set / token with unexpected characters
++
+     static std::optional<KeyResult> parseKey (const juce::var& v);
+     void loadConfig();
+     void loadPinnedCerts (const juce::File& pem);
+@@ -80,6 +92,9 @@
+     void* hConnect = nullptr;            // HINTERNET (Windows)
+ 
+     juce::String host, apiKey;
++    mutable juce::CriticalSection providerLock;
++    std::function<juce::String()> tokenProvider;         // guarded by providerLock
++    std::atomic<bool> tokenModeLogged { false };
+     int port = 443;
+     bool secure = true;
+ 
+diff -ru ptLive.orig/src/MainApplication.cpp ptLive/src/MainApplication.cpp
+--- ptLive.orig/src/MainApplication.cpp	2026-10-08 11:03:12.374296127 +0000
++++ ptLive/src/MainApplication.cpp	2026-10-08 11:03:36.097064675 +0000
+@@ -199,7 +199,9 @@
+ 
+     ptl::recent::add(file);                      // opened from Explorer / Open... / Recent: top of the recent list
+ 
+-    mainWindow.reset(new MainWindow("pt.Live", file));
++    // The VPS key lookup authenticates with the license token (X-License-Token). The window is destroyed before
++    // licenseClient (see shutdown), so the pointer inside this lambda never dangles.
++    mainWindow.reset(new MainWindow("pt.Live", file, [this] { return licenseClient != nullptr ? licenseClient->currentToken() : juce::String(); }));
+ 
+     // Double-click on the licence status (title bar) = enter / renew a key.
+     mainWindow->onLicenseRequested = [this] { showLicenseDialog(); };
+diff -ru ptLive.orig/src/MainWindow.cpp ptLive/src/MainWindow.cpp
+--- ptLive.orig/src/MainWindow.cpp	2026-10-08 11:03:12.374310931 +0000
++++ ptLive/src/MainWindow.cpp	2026-10-08 11:03:36.096848782 +0000
+@@ -21,9 +21,10 @@
+ 
+ using namespace ptl;
+ 
+-MainWindow::MainWindow(juce::String name, const juce::File& fileToOpen)
++MainWindow::MainWindow(juce::String name, const juce::File& fileToOpen, std::function<juce::String()> tokenProvider)
+     : juce::ResizableWindow(name, false),
+-      titleBar(*this)
++      titleBar(*this),
++      licenseTokenProvider(std::move(tokenProvider))
+ {
+     //=== Plugin scanner (also feeds the inspector's "Add insert" menu) =======
+     // Created first: its cached VST3 list is handed to the engine so that a saved session's
+@@ -1145,7 +1146,7 @@
+     };
+ 
+     //=== VPS key lookup (same API as the released ptStudio) ==================
+-    keyFetcher = std::make_unique<KeyFetcher>();
++    keyFetcher = std::make_unique<KeyFetcher>(licenseTokenProvider);
+ 
+     keyFetcher->onProgress = [this](const juce::String& id, KeyFetcher::Stage stage)
+     {
+diff -ru ptLive.orig/src/Net/KeyFetcher.cpp ptLive/src/Net/KeyFetcher.cpp
+--- ptLive.orig/src/Net/KeyFetcher.cpp	2026-10-08 11:03:12.374349920 +0000
++++ ptLive/src/Net/KeyFetcher.cpp	2026-10-08 11:03:36.095460837 +0000
+@@ -6,8 +6,10 @@
+ #include "include/Net/KeyFetcher.h"
+ #include "include/Audio/PtLog.h"
+ 
+-KeyFetcher::KeyFetcher() : juce::Thread ("pt.Live key fetcher")
++KeyFetcher::KeyFetcher (std::function<juce::String()> tokenProvider) : juce::Thread ("pt.Live key fetcher")
+ {
++    if (tokenProvider)
++        client.setTokenProvider (std::move (tokenProvider));     // before startThread: no race with run()
+     startThread (juce::Thread::Priority::low);
+ }
+ 
+diff -ru ptLive.orig/src/Net/LicenseClient.cpp ptLive/src/Net/LicenseClient.cpp
+--- ptLive.orig/src/Net/LicenseClient.cpp	2026-10-08 11:03:12.374364752 +0000
++++ ptLive/src/Net/LicenseClient.cpp	2026-10-08 11:03:12.427904400 +0000
+@@ -385,12 +385,22 @@
+     s.lastSeen = (juce::int64) json.getProperty ("last_seen", 0);
+     if (s.token.isEmpty())
+         return std::nullopt;
++    cachedToken = s.token;
+     return s;
+ }
+ 
++juce::String LicenseClient::currentToken()
++{
++    const juce::ScopedLock sl (storeLock);
++    if (cachedToken.isEmpty())
++        loadStored();                                      // fills cachedToken; cheap when license.dat does not exist
++    return cachedToken;
++}
++
+ void LicenseClient::saveStored (const Stored& s)
+ {
+     const juce::ScopedLock sl (storeLock);
++    cachedToken = s.token;                                 // new token (activate / refresh) is used by the next request
+ 
+     auto* o = new juce::DynamicObject();
+     o->setProperty ("token", s.token);
+@@ -412,6 +422,7 @@
+ void LicenseClient::clearStored()
+ {
+     const juce::ScopedLock sl (storeLock);
++    cachedToken = {};
+     storeFile().deleteFile();
+ }
+ 
+diff -ru ptLive.orig/src/Net/VpsClient.cpp ptLive/src/Net/VpsClient.cpp
+--- ptLive.orig/src/Net/VpsClient.cpp	2026-10-08 11:03:12.374414300 +0000
++++ ptLive/src/Net/VpsClient.cpp	2026-10-08 11:03:26.821959449 +0000
+@@ -58,9 +58,39 @@
+    #endif
+ }
+ 
++void VpsClient::setTokenProvider (std::function<juce::String()> provider)
++{
++    const juce::ScopedLock sl (providerLock);
++    tokenProvider = std::move (provider);
++}
++
++juce::String VpsClient::currentToken() const
++{
++    std::function<juce::String()> provider;
++    {
++        const juce::ScopedLock sl (providerLock);
++        provider = tokenProvider;               // copy: the provider runs OUTSIDE the lock
++    }
++    if (! provider) return {};
++
++    auto token = provider().trim();
++    // A token is base64url + '.', nothing else. Anything different must never reach a header line (CR/LF injection).
++    if (token.isNotEmpty() && ! token.containsOnly ("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.="))
++    {
++        ptl::diag::write ("[vps] license token has unexpected characters - not sent");
++        return {};
++    }
++    return token;
++}
++
++bool VpsClient::isConfigured() const
++{
++    return host.isNotEmpty() && (apiKey.isNotEmpty() || currentToken().isNotEmpty());
++}
++
+ void VpsClient::warmUp()
+ {
+-    if (! isConfigured()) return;
++    if (! isConfigured()) return;           // no key and no token yet: a request would only be a sure 401
+     std::atomic<bool> never { false };
+     request ("GET", "/api/tone-cache/check/ptlive-warmup", {}, 4000, never);      // the answer is ignored
+ }
+@@ -89,8 +119,11 @@
+     port   = u.getPort() > 0 ? u.getPort() : 443;
+     secure = true;
+ 
+-    if (! isConfigured())
+-        ptl::diag::write ("[vps] vps_config.json is missing url or key");
++    // (the token provider is not set yet at this point, so only url / key are judged here)
++    if (host.isEmpty())
++        ptl::diag::write ("[vps] vps_config.json is missing url");
++    else if (apiKey.isEmpty())
++        ptl::diag::write ("[vps] vps_config.json has no key - token mode (X-License-Token only)");
+ 
+     if (auto pem = findConfigFile ("vps_cert.pem"); pem.existsAsFile())
+         loadPinnedCerts (pem);
+@@ -167,7 +200,14 @@
+                                         int timeoutMs, std::atomic<bool>& cancel, bool retried, bool sendApiKey)
+ {
+     Response out;
+-    if ((sendApiKey ? ! isConfigured() : host.isEmpty()) || cancel.load()) return out;
++
++    // Credentials of this request. Read BEFORE netLock is taken (the provider locks the license store).
++    // /api/license/* is authorised by the key / token inside its body: it gets neither header.
++    const bool isLicensePath = path.startsWith ("/api/license/");
++    const juce::String token = (sendApiKey && ! isLicensePath) ? currentToken() : juce::String();
++
++    if (host.isEmpty() || cancel.load()) return out;
++    if (sendApiKey && apiKey.isEmpty() && token.isEmpty()) return out;     // not configured: fail quietly, as before
+ 
+    #if JUCE_WINDOWS
+     struct Handle
+@@ -217,7 +257,16 @@
+         WinHttpSetOption (req.h, WINHTTP_OPTION_SECURITY_FLAGS, &flags, sizeof (flags));
+     }
+ 
+-    juce::String headers = sendApiKey ? "X-API-Key: " + apiKey + "\r\n" : juce::String();
++    juce::String headers;
++    if (sendApiKey && apiKey.isNotEmpty())
++        headers << "X-API-Key: " << apiKey << "\r\n";
++    if (token.isNotEmpty())
++    {
++        headers << "X-License-Token: " << token << "\r\n";
++        if (! tokenModeLogged.exchange (true))        // once, never the token itself
++            ptl::diag::write (juce::String ("[vps] requests carry X-License-Token (X-API-Key ")
++                              + (apiKey.isNotEmpty() ? "also sent" : "not sent - token mode") + ")");
++    }
+     const auto bodyUtf8 = jsonBody.toStdString();
+     if (jsonBody.isNotEmpty())
+         headers << "Content-Type: application/json\r\n";

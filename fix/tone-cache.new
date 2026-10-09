@@ -1,0 +1,128 @@
+# /etc/nginx/sites-enabled/tone-cache  (bản mới)
+# File này được include trong http{} nên limit_req_zone khai báo ở đây có hiệu lực toàn cục (nginx.conf gốc đã làm vậy với zone "lic").
+#
+# Rate chọn dựa trên hành vi THẬT của client ptLive (đã đọc code KeyFetcher/VpsClient):
+#   - mỗi bài: 1x check, 1x job, rồi long-poll /api/worker/result mỗi ~3s (pollWindowSec=3) => ~20 req/phút khi đang chờ
+#   => zone worker KHÔNG được để 5r/m (bản plan cũ) vì sẽ 429 sau ~15s và làm hỏng nhận diện key.
+limit_req_zone $binary_remote_addr zone=lic:10m      rate=10r/m;
+limit_req_zone $binary_remote_addr zone=worker:10m   rate=60r/m;   # long-poll 3s ≈ 20/m + job + dư cho nhiều máy sau cùng 1 NAT
+limit_req_zone $binary_remote_addr zone=tc:10m       rate=60r/m;   # check/{id}, health, còn lại
+limit_req_zone $binary_remote_addr zone=audio:10m    rate=6r/m;    # tốn CPU/băng thông (tải clip YouTube)
+limit_req_zone $binary_remote_addr zone=tcall:10m    rate=6r/m;    # /all (2.3MB) - giữ nguyên 6r/m như cũ để không ảnh hưởng ptStudio
+limit_req_zone $binary_remote_addr zone=tcsync:10m   rate=12r/m;   # /sync riêng: ptStudio có thể ghi nhiều lô, không để /all chiếm quota
+limit_conn_zone $binary_remote_addr zone=perip:10m;
+
+server {
+    listen 443 ssl;
+    server_name _;
+    server_tokens off;
+
+    ssl_certificate     /etc/ssl/tone-cache/cert.pem;
+    ssl_certificate_key /etc/ssl/tone-cache/key.pem;
+
+    limit_req_status 429;
+    limit_req_log_level warn;
+    limit_conn perip 40;
+
+    # ===== ptLive License Server =====
+    location /api/license/ {
+        limit_req zone=lic burst=10 nodelay;
+        proxy_pass http://127.0.0.1:8765;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_connect_timeout 8s;
+        proxy_send_timeout 10s;
+        proxy_read_timeout 10s;
+        client_max_body_size 8k;
+    }
+
+    # ===== pt.Live License Admin UI =====
+    location = /admin.html {
+        limit_req zone=lic burst=10 nodelay;
+        proxy_pass http://127.0.0.1:8765;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+    }
+
+    # ===== WebSocket worker: KHÔNG limit_req (kết nối dài, đã có token riêng) =====
+    location = /ws/worker {
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_pass http://127.0.0.1:8000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+
+    # ===== Worker job/result (long-poll) =====
+    location /api/worker/ {
+        limit_req zone=worker burst=30 nodelay;
+        client_max_body_size 4k;
+        proxy_http_version 1.1;
+        proxy_pass http://127.0.0.1:8000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_connect_timeout 5s;
+        proxy_read_timeout 30s;      # server giữ request tối đa `timeout` giây
+    }
+
+    # ===== Audio fallback =====
+    location /api/audio/ {
+        limit_req zone=audio burst=3 nodelay;
+        client_max_body_size 1k;
+        proxy_pass http://127.0.0.1:8000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_read_timeout 120s;     # tải + cắt clip có thể lâu
+    }
+
+    # ===== Bulk: tải toàn bộ cache / ghi cache (ptStudio, nội bộ) =====
+    location = /api/tone-cache/all {
+        limit_req zone=tcall burst=3 nodelay;
+        proxy_pass http://127.0.0.1:8000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_read_timeout 60s;
+    }
+    location = /api/tone-cache/sync {
+        limit_req zone=tcsync burst=5 nodelay;
+        client_max_body_size 1m;     # 128k của plan cũ có thể làm 413 khi ptStudio sync lô lớn
+        proxy_pass http://127.0.0.1:8000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+
+    # ===== tone-cache còn lại (check/{id}, ...) =====
+    location /api/tone-cache/ {
+        limit_req zone=tc burst=30 nodelay;
+        client_max_body_size 16k;
+        proxy_pass http://127.0.0.1:8000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+
+    # ===== Còn lại (/health, ...) =====
+    location / {
+        limit_req zone=tc burst=30 nodelay;
+        client_max_body_size 16k;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_pass http://127.0.0.1:8000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+}
+
+server {
+    listen 80;
+    server_name _;
+    server_tokens off;
+    return 301 https://$host$request_uri;
+}

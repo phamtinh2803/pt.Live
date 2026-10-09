@@ -1,0 +1,40 @@
+# Keys và secrets — KHÔNG BAO GIỜ up
+_keys_backup/
+
+# VPS config có key (nếu tồn tại)
+vps_config.json
+vps_cert.pem
+
+# Build artifacts
+build/
+*.pdb
+*.map
+installer/pt.Live-*.exe
+
+# Temp
+*.tmp
+*.log
+*.swp
+.swo
+*~
+*.pyc
+__pycache__/
+
+# Zip archives (build temp / backups)
+*.zip
+
+# Local-only files
+local_update_state.json
+test_build_*.exe
+
+# IDE & Editor
+.vscode/
+.idea/
+*.user
+*.suo
+CMakeCache.txt
+CMakeFiles/
+
+# OS hidden
+.DS_Store
+Thumbs.db

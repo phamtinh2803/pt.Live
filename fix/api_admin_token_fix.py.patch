@@ -1,0 +1,22 @@
+--- api.py
++++ api.py
+@@ -2,6 +2,7 @@
+ api.py - lop HTTP mong cho ptlicense (FastAPI). Chay:  uvicorn api:app --host 127.0.0.1 --port 8765
+ (da kiem thu phan loi ptlicense.py; file nay la khung ghep, hay thu tren VPS cua ban truoc khi phat hanh)
+ """
++import hmac
+ import os
+ from pathlib import Path
+ import ptlicense as L
+@@ -44,8 +45,9 @@
+ def _check_admin(request: Request):
+     if not ADMIN_TOKEN:
+         raise L.LicenseError("bad_request", 400, "server chua cau hinh admin token")
+-    tok = request.headers.get("x-admin-token") or (request.query_params.get("token") or "")
+-    if tok != ADMIN_TOKEN:
++    # Chi nhan qua header (query string bi ghi vao access log / history / Referer). So sanh hang so thoi gian.
++    tok = request.headers.get("x-admin-token", "")
++    if not tok or not hmac.compare_digest(tok.encode("utf-8"), ADMIN_TOKEN.encode("utf-8")):
+         raise L.LicenseError("unauthorized", 401, "sai admin token")
+ 
+ 

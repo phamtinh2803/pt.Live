@@ -1,0 +1,6 @@
+{
+  "version": "0.1.0",
+  "url": "https://github.com/PT-STUDIO/pt.live/releases/download/v0.1.0/pt.Live-0.1.0.exe",
+  "sha256": "",
+  "notes": "pt.Live 0.1.0 - bản phát hành đầu tiên.\n- Live Singing DAW với giao diện tối\n- ASIO low-latency\n- VST3 plugin support\n- MASTER recording\n- Tự kiểm tra cập nhật khi khởi động"
+}
