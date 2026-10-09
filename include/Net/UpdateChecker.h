@@ -1,16 +1,20 @@
 /*
     pt.Live - Live Singing DAW
-    UpdateChecker - asks the VPS once, in the background, whether a newer pt.Live exists.
+    UpdateChecker - asks for a newer pt.Live once, in the background.
 
-    The VPS serves a tiny PUBLIC manifest (no key, no token, nothing secret in it):
+    The manifest (a tiny PUBLIC file, no key, no token, nothing secret in it) comes from a configurable URL.
+    Defaults to the GitHub repo raw file; can be overridden (e.g. to a self-hosted VPS) if needed:
 
-        GET  <vps url from vps_config.json>/ptlive/update.json
+        GET  <manifestUrl>
         {
           "version": "0.1.1",                                  required, digits and dots only
           "url":     "https://.../ptLive-0.1.1-setup.exe",     required, https only, DIRECT link to the installer
           "sha256":  "<64 hex chars>",                         optional, checked after the download (recommended)
           "notes":   "- Fixed ...\n- Added ..."                optional, plain text shown in the dialog
         }
+
+    Default manifest URL (overridable via setManifestUrl):
+        https://raw.githubusercontent.com/PT-STUDIO/pt.live/main/release/update.json
 
     Rules:
       - Newer than the running version (MainApplication::getApplicationVersion()) AND not skipped -> onFound().
@@ -44,6 +48,10 @@ public:
     UpdateChecker();
     ~UpdateChecker() override;
 
+    // Overrides where the manifest comes from. Must be called BEFORE checkInBackground(). https only.
+    // Leave it alone to use the built-in GitHub default (kDefaultManifestUrl).
+    void setManifestUrl (const juce::String& absoluteHttpsUrl);
+
     // Starts the check once. `currentVersion` = the running version, e.g. "0.1.0".
     void checkInBackground (const juce::String& currentVersion, Found onFound);
 
@@ -54,11 +62,20 @@ public:
     static void skipVersion (const juce::String& version);
     static juce::String getSkippedVersion();
 
-    static constexpr const char* kManifestPath = "/ptlive/update.json";
+    // Where the manifest lives when nothing overrides it: the repo's raw file on GitHub (valid public HTTPS cert,
+    // no cert pinning needed). Change here + push to move every future release to another host.
+    static constexpr const char* kDefaultManifestUrl =
+        "https://raw.githubusercontent.com/PT-STUDIO/pt.live/main/release/update.json";
 
 private:
     void run() override;
 
+    // GitHub raw download, own connection (no cert pinning), for kDefaultManifestUrl.
+    juce::String fetchManifestFromGithub (const juce::String& url, int timeoutMs) const;
+    // Pinned-cert connection to the VPS in vps_config.json, for a self-hosted manifest path.
+    juce::String fetchManifestFromVps (const juce::String& path, int timeoutMs);
+
+    juce::String manifestUrl;               // absolute https URL; empty = use the VPS path below
     VpsClient vps;                          // own connection: never competes with the license / key traffic
     juce::String current;
     Found onFound;

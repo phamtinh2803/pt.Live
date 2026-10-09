@@ -58,10 +58,20 @@ UpdateChecker::~UpdateChecker()
     stopThread (7000);
 }
 
+void UpdateChecker::setManifestUrl (const juce::String& absoluteHttpsUrl)
+{
+    manifestUrl = absoluteHttpsUrl.trim();
+    if (! manifestUrl.startsWithIgnoreCase ("https://"))
+        manifestUrl = {};                        // only https manifests are trusted
+}
+
 void UpdateChecker::checkInBackground (const juce::String& currentVersion, Found found)
 {
     if (isThreadRunning())
         return;
+
+    if (manifestUrl.isEmpty())
+        manifestUrl = kDefaultManifestUrl;       // fall back to the built-in GitHub default
 
     current = currentVersion;
     onFound = std::move (found);
@@ -108,20 +118,76 @@ void UpdateChecker::skipVersion (const juce::String& version)
 }
 
 //==============================================================================
+// GitHub raw download. Uses the ordinary Windows TLS validation (githubusercontent.com has a valid public cert),
+// so no pinned certificate is involved and no vps_config.json is required.
+juce::String UpdateChecker::fetchManifestFromGithub (const juce::String& url, int timeoutMs) const
+{
+    juce::WebInputStream web (juce::URL (url), false);
+    web.withNumRedirectsToFollow (5)
+       .withConnectionTimeout (timeoutMs)
+       .withExtraHeaders ("User-Agent: ptLive-updater\r\n");
+
+    if (! web.connect (nullptr))
+        return {};
+
+    if (web.getStatusCode() != 200)
+        return {};
+
+    juce::MemoryBlock data;
+    char buffer[4096];
+    for (;;)
+    {
+        if (cancel.load() || threadShouldExit())
+            return {};
+
+        const int n = web.read (buffer, (int) sizeof (buffer));
+        if (n <= 0)
+            break;
+
+        data.append (buffer, (size_t) n);
+        if (data.getSize() > 256 * 1024)         // the manifest is a few hundred bytes
+            break;
+    }
+
+    return data.toString();
+}
+
+juce::String UpdateChecker::fetchManifestFromVps (const juce::String& path, int timeoutMs)
+{
+    const auto r = vps.getPublic (path, cancel, timeoutMs);
+    return r.status == 200 ? r.body : juce::String();
+}
+
+//==============================================================================
 void UpdateChecker::run()
 {
-    const auto r = vps.getPublic (kManifestPath, cancel, kRequestTimeoutMs);
+    const bool useGithub = manifestUrl.startsWithIgnoreCase ("https://raw.githubusercontent.com/")
+                        || manifestUrl.startsWithIgnoreCase ("https://github.com/")
+                        || manifestUrl.startsWithIgnoreCase ("https://objects.githubusercontent.com/");
+
+    juce::String body;
+
+    if (useGithub)
+    {
+        body = fetchManifestFromGithub (manifestUrl, kRequestTimeoutMs);
+        if (body.isEmpty())
+            ptl::diag::write ("[update] no manifest from GitHub (offline / 404 / cancelled)");
+    }
+    else
+    {
+        // A self-hosted manifest path on the same VPS the licence uses (pinned TLS, from vps_config.json).
+        body = fetchManifestFromVps ("/ptlive/update.json", kRequestTimeoutMs);
+        if (body.isEmpty())
+            ptl::diag::write ("[update] no manifest from the VPS (offline / 404 / cancelled)");
+    }
 
     if (threadShouldExit() || cancel.load())
         return;
 
-    if (r.status != 200)
-    {
-        ptl::diag::write ("[update] no manifest (HTTP " + juce::String (r.status) + ") - skipping the check");
+    if (body.isEmpty())
         return;
-    }
 
-    const auto json = juce::JSON::parse (r.body);
+    const auto json = juce::JSON::parse (body);
     if (! json.isObject())
     {
         ptl::diag::write ("[update] manifest is not a JSON object - ignored");
