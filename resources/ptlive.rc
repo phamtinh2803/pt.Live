@@ -1,9 +1,0 @@
-// pt.Live - Windows application resource.
-// Embeds ptlive.ico so it appears in Explorer, the taskbar and Alt-Tab,
-// and uses it as the title-bar icon for both the main window and plugin windows.
-
-#include <winuser.h>
-
-// App icon (RT_GROUP_ICON). "ptlive.ico" is copied next to the .rc at configure time.
-#define APP_ICON_ID   101
-APP_ICON_ID       ICON    "ptlive.ico"
