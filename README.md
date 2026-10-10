@@ -8,7 +8,7 @@ Không chứa source code.
 Ứng dụng pt.Live khi khởi động sẽ đọc file:
 
 ```
-https://raw.githubusercontent.com/phamtinh2803/ptLive.daw/main/release/update.json
+https://raw.githubusercontent.com/phamtinh2803/pt.Live/main/release/update.json
 ```
 
 Nếu `version` trong file **cao hơn** bản đang chạy, app hiện dialog hỏi user có cập nhật không.
@@ -36,7 +36,7 @@ File installer `.exe` **không** để trong repo này mà đính vào
    ```json
    {
      "version": "0.1.1",
-     "url": "https://github.com/phamtinh2803/ptLive.daw/releases/download/v0.1.1/pt.Live-0.1.1.exe",
+     "url": "https://github.com/phamtinh2803/pt.Live/releases/download/v0.1.1/pt.Live-0.1.1.exe",
      "sha256": "<hash ở bước 2>",
      "notes": "- Sửa lỗi A\n- Thêm tính năng B"
    }
