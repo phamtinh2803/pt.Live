@@ -1,6 +1,6 @@
 {
-  "version": "0.1.3",
-  "url": "https://github.com/phamtinh2803/pt.Live/releases/download/v0.1.3/pt.Live-0.1.3.exe",
-  "sha256": "afeb9317ec81f016d956958d7cb38c6a3d8cec66954aae781e6986ad9031eb0c",
-  "notes": "pt.Live 0.1.3 - cập nhật tự động.\n- Live Singing DAW với giao diện tối\n- ASIO low-latency\n- VST3 plugin support\n- MASTER recording\n- Tự kiểm tra cập nhật khi khởi động\n- Sửa lỗi mất icon (nốt nhạc, v.v.) trên bản cài đặt"
+  "version": "0.1.4",
+  "url": "https://github.com/phamtinh2803/pt.Live/releases/download/v0.1.4/pt.Live-0.1.4.exe",
+  "sha256": "cdfe6e43d04d00dbb4f82068571435824ec84c032a776f988461c7fc9152807e",
+  "notes": "pt.Live 0.1.4 - cập nhật tự động.\n- Live Singing DAW với giao diện tối\n- ASIO low-latency\n- VST3 plugin support\n- MASTER recording\n- Tự kiểm tra cập nhật khi khởi động\n- Sửa lỗi mất icon (nốt nhạc, v.v.) trên bản cài đặt"
 }
